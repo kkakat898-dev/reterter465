@@ -1,127 +1,145 @@
 import asyncio
 import logging
-import random
-import string
-import secrets
-import os
-from aiohttp import web
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart
-from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-
-# Конфигурация
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 8080))
-
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
-router = Router()
 
-# Словари данных
-PREFIXES = ["The", "Mr", "Lord", "Darth", "Sir", "Master", "Agent", "Dr", "Real", "Pro", "Cyber", "Void"]
-MIDDLES = ["Yonu", "Dark", "Neon", "Quantum", "Shadow", "Iron", "Astro", "Mystic", "Crimson", "Frost"]
-SUFFIXES = ["Sage", "Knight", "Ninja", "Wizard", "Hacker", "Phantom", "Dragon", "Wolf", "Samurai", "Zero"]
+# --- Настройки бота (Токен будет браться из переменных окружения Railway) ---
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН_ДЛЯ_ТЕСТОВ")
 
-LEET_MAP = {'a': '4', 'e': '3', 'i': '1', 'o': '0', 's': '5', 't': '7'}
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# --- Логика генерации ---
+# --- Машина состояний (FSM) для ожидания ввода пользователя ---
+class UserConfig(StatesGroup):
+    waiting_for_hex_color = State()
+    waiting_for_resolution = State()
 
-def apply_style(text: str) -> str:
-    """Добавляет стиль: Leet Speak или случайные цифры в конец"""
-    chance = random.random()
-    if chance < 0.3: # 30% шанс на Leet Speak
-        res = "".join(LEET_MAP.get(c.lower(), c) if random.random() > 0.5 else c for c in text)
-        return res
-    elif chance < 0.6: # 30% шанс добавить цифры в стиле '99' или '2024'
-        return f"{text}_{random.randint(10, 999)}"
-    return text
+# --- База данных (в памяти для примера) ---
+# В реальном проекте используй SQLite или PostgreSQL
+user_data = {}
 
-def gen_classic_nick():
-    return f"{random.choice(PREFIXES)}{random.choice(MIDDLES)}{random.choice(SUFFIXES)}"
+def get_default_config():
+    return {
+        "bg_color": "#000000",
+        "resolution": "1920x530 60 FPS",
+        "format": "GIF",
+        "watermark": None
+    }
 
-def gen_random_string(length=10):
-    """Ник типа xR4_92pL"""
-    chars = string.ascii_letters + string.digits
-    return "".join(secrets.choice(chars) for _ in range(length))
+# --- Клавиатуры ---
+def get_main_keyboard() -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Кошелёк · 10₽", callback_data="wallet")],
+        [
+            InlineKeyboardButton(text="Цвет фона", callback_data="set_bg_color"),
+            InlineKeyboardButton(text="Разрешение", callback_data="set_resolution")
+        ],
+        [
+            InlineKeyboardButton(text="Формат", callback_data="set_format"),
+            InlineKeyboardButton(text="Своя медиа", callback_data="set_media")
+        ],
+        [
+            InlineKeyboardButton(text="ЦветEmoji", callback_data="set_emoji_color"),
+            InlineKeyboardButton(text="Заметки", callback_data="set_notes")
+        ],
+        [
+            InlineKeyboardButton(text="Вотермарка", callback_data="set_watermark"),
+            InlineKeyboardButton(text="Предосмотр", callback_data="preview")
+        ]
+    ])
+    return keyboard
 
-def generate_password(length=16):
-    chars = string.ascii_letters + string.digits + "!@#$%^&*"
-    while True:
-        pwd = ''.join(secrets.choice(chars) for _ in range(length))
-        if (any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and sum(c.isdigit() for c in pwd) >= 3):
-            return pwd
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◁ Назад", callback_data="back_to_main")]
+    ])
 
-# --- Хэндлеры ---
-
-@router.message(CommandStart())
-async def cmd_start(message: Message):
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="👤 Генератор Ников"), kb.button(text="🔑 Генератор Паролей")
-    kb.button(text="🛠 Настройки")
-    kb.adjust(2, 1)
-    await message.answer(
-        "⚡️ <b>GenMaster Bot v2.0</b>\n\nВыберите категорию на клавиатуре ниже:",
-        reply_markup=kb.as_markup(resize_keyboard=True)
-    )
-
-@router.message(F.text == "👤 Генератор Ников")
-async def nick_menu(message: Message):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✨ Стильный (TheYonuSage)", callback_data="nick_style")
-    kb.button(text="🎲 Микс (xR4_92pL)", callback_data="nick_mix")
-    kb.adjust(1)
-    await message.answer("Выберите тип никнейма:", reply_markup=kb.as_markup())
-
-@router.callback_query(F.data.startswith("nick_"))
-async def handle_nick_gen(callback: CallbackQuery):
-    mode = callback.data.split("_")[1]
-    result = apply_style(gen_classic_nick()) if mode == "style" else gen_random_string()
+# --- Хэндлеры команд ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_data:
+        user_data[user_id] = get_default_config()
     
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Еще раз", callback_data=callback.data)
-    kb.button(text="⬅️ Назад", callback_data="back_to_main")
+    config = user_data[user_id]
     
-    await callback.message.edit_text(f"Ваш ник:\n<code>{result}</code>", reply_markup=kb.as_markup())
-
-@router.message(F.text == "🔑 Генератор Паролей")
-async def pass_gen(message: Message):
-    pwd = generate_password()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Сгенерировать новый", callback_data="pass_reg")
-    await message.answer(f"Ваш надежный пароль:\n<code>{pwd}</code>\n\n<i>Нажми, чтобы скопировать</i>", reply_markup=kb.as_markup())
-
-@router.callback_query(F.data == "pass_reg")
-async def cb_pass(callback: CallbackQuery):
-    pwd = generate_password()
-    await callback.message.edit_text(
-        f"Ваш надежный пароль:\n<code>{pwd}</code>", 
-        reply_markup=callback.message.reply_markup
+    text = (
+        "😈 Создан для пиздатого оформления ботов or сайтов\n\n"
+        "📤 Отправь мне:\n"
+        "<code>прем эмодзи - можно несколько or стикер, ссылку на пак emoji or sticker</code>\n\n"
+        "⌘ Конфигурация:\n"
+        f"🎨 Цвет фона: <code>{config['bg_color']}</code>\n"
+        f"🔲 Разрешение: <code>{config['resolution']}</code>\n"
+        f"🎞 Формат: <code>{config['format']}</code>"
     )
+    
+    # В идеале отправлять с картинкой: message.answer_photo(photo="URL", caption=text, ...)
+    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
-@router.callback_query(F.data == "back_to_main")
-async def back_home(callback: CallbackQuery):
-    await callback.message.delete()
-    await nick_menu(callback.message)
+# --- Хэндлеры кнопок меню ---
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cmd_start(callback.message)
+    await callback.answer()
 
-# --- Railway Server ---
-async def handle(request):
-    return web.Response(text="Bot is alive")
+@dp.callback_query(F.data == "set_bg_color")
+async def set_bg_color(callback: types.CallbackQuery, state: FSMContext):
+    text = (
+        "🎨 Введи новый HEX-цвет для фона типо:\n\n"
+        "<code>FFFFFF</code> - белый\n"
+        "<code>000000</code> - черный"
+    )
+    # Добавляем кнопку "Подобрать цвет" и "Назад"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подобрать цвет", url="https://htmlcolorcodes.com/")],
+        [InlineKeyboardButton(text="◁ Назад", callback_data="back_to_main")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(UserConfig.waiting_for_hex_color)
+    await callback.answer()
 
+# --- Хэндлеры ввода текста (Состояния) ---
+@dp.message(UserConfig.waiting_for_hex_color)
+async def process_hex_color(message: types.Message, state: FSMContext):
+    new_color = message.text.strip().upper()
+    if not new_color.startswith("#"):
+        new_color = f"#{new_color}"
+    
+    user_id = message.from_user.id
+    user_data[user_id]["bg_color"] = new_color
+    
+    await state.clear()
+    await message.answer(f"✅ Цвет фона успешно изменен на {new_color}!")
+    await cmd_start(message) # Возвращаем в главное меню
+
+# --- Обработка отправки стикеров/эмодзи (Скелет рендера) ---
+@dp.message(F.sticker | F.animation | F.text)
+async def handle_media_for_render(message: types.Message):
+    # Если мы не в состоянии настройки (FSM пуст) и нам прислали стикер
+    await message.answer("🔄 Принято! Начинаю рендер с твоими настройками. Это может занять несколько секунд...")
+    
+    # ТУТ ДОЛЖНА БЫТЬ ЛОГИКА РЕНДЕРА
+    # 1. Скачиваем стикер/эмодзи
+    # 2. Накладываем на фон PIL/ffmpeg
+    # 3. Отправляем обратно
+    
+    await asyncio.sleep(2) # Имитация работы
+    await message.answer("✅ Готово! (Тут будет отправляться готовая GIF/Видео)")
+
+
+# --- Запуск бота ---
 async def main():
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
-    dp.include_router(router)
-
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    
-    await asyncio.gather(site.start(), dp.start_polling(bot))
+    print("Бот запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())

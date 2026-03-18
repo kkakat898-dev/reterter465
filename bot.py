@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import json
 import asyncio
 import requests
 from bs4 import BeautifulSoup
@@ -23,7 +24,8 @@ TEMP_DIR = "temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -35,48 +37,87 @@ def cleanup_file(path: str):
         pass
 
 
+def resolve_url(url: str) -> str:
+    r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+    r.raise_for_status()
+    return r.url
+
+
+def find_all_mp4_urls(html: str):
+    patterns = [
+        r'https://v1\.pinimg\.com/videos/[^"\']+\.mp4[^"\']*',
+        r'https://v\.pinimg\.com/videos/[^"\']+\.mp4[^"\']*',
+        r'https://i\.pinimg\.com/videos/[^"\']+\.mp4[^"\']*',
+        r'"url":"(https:[^"]+\.mp4[^"]*)"',
+        r'"contentUrl":"(https:[^"]+\.mp4[^"]*)"',
+    ]
+
+    found = []
+    for pat in patterns:
+        matches = re.findall(pat, html)
+        for m in matches:
+            m = m.replace("\\u002F", "/").replace("\\/", "/")
+            if m.startswith("https:") and m not in found:
+                found.append(m)
+    return found
+
+
+def find_best_image(html: str, soup: BeautifulSoup):
+    og_image = soup.find("meta", property="og:image")
+    if og_image and og_image.get("content"):
+        return og_image["content"]
+
+    patterns = [
+        r'https://i\.pinimg\.com/originals/[^"\']+',
+        r'https://i\.pinimg\.com/736x/[^"\']+',
+        r'"image_url":"(https:[^"]+)"',
+        r'"orig":"(https:[^"]+)"',
+    ]
+
+    for pat in patterns:
+        matches = re.findall(pat, html)
+        if matches:
+            url = matches[0].replace("\\u002F", "/").replace("\\/", "/")
+            return url
+
+    return None
+
+
 def extract_pinterest_media(url: str):
-    r = requests.get(url, headers=HEADERS, timeout=20)
+    real_url = resolve_url(url)
+    r = requests.get(real_url, headers=HEADERS, timeout=25)
     r.raise_for_status()
 
-    soup = BeautifulSoup(r.text, "lxml")
+    html = r.text
+    soup = BeautifulSoup(html, "lxml")
 
-    # 1. video via og:video
+    # 1. direct meta
     og_video = soup.find("meta", property="og:video")
     if og_video and og_video.get("content"):
         return "video", og_video["content"]
 
-    # 2. image via og:image
-    og_image = soup.find("meta", property="og:image")
-    if og_image and og_image.get("content"):
-        return "image", og_image["content"]
+    # 2. search all mp4 urls
+    mp4s = find_all_mp4_urls(html)
+    if mp4s:
+        # try longest url first, usually best quality
+        mp4s.sort(key=len, reverse=True)
+        return "video", mp4s[0]
 
-    # fallback search in html
-    html = r.text
-
-    video_match = re.search(r'https://v1\.pinimg\.com/videos/[^"\']+', html)
-    if video_match:
-        return "video", video_match.group(0)
-
-    image_match = re.search(r'https://i\.pinimg\.com/originals/[^"\']+', html)
-    if image_match:
-        return "image", image_match.group(0)
-
-    image_match2 = re.search(r'https://i\.pinimg\.com/736x/[^"\']+', html)
-    if image_match2:
-        return "image", image_match2.group(0)
+    # 3. fallback image
+    image_url = find_best_image(html, soup)
+    if image_url:
+        return "image", image_url
 
     return None, None
 
 
 def download_file(url: str, ext: str):
-    file_id = uuid.uuid4().hex
-    path = os.path.join(TEMP_DIR, f"{file_id}.{ext}")
+    path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}.{ext}")
 
-    with requests.get(url, headers=HEADERS, stream=True, timeout=30) as r:
+    with requests.get(url, headers=HEADERS, stream=True, timeout=60) as r:
         r.raise_for_status()
         with open(path, "wb") as f:
-            for chunk in r.iter_content(8192):
+            for chunk in r.iter_content(1024 * 64):
                 if chunk:
                     f.write(chunk)
 
@@ -86,8 +127,8 @@ def download_file(url: str, ext: str):
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
     await message.answer(
-        "📌 Отправь ссылку на Pinterest post/pin.\n\n"
-        "Я попробую скачать фото или видео и отправить обратно."
+        "📌 Отправь ссылку на Pinterest.\n\n"
+        "Я попробую скачать фото или видео."
     )
 
 
@@ -105,7 +146,7 @@ async def handle_link(message: Message):
         media_type, media_url = extract_pinterest_media(text)
 
         if not media_url:
-            await wait_msg.edit_text("❌ Не удалось найти фото или видео по этой ссылке.")
+            await wait_msg.edit_text("❌ Не удалось найти фото или видео.")
             return
 
         if media_type == "video":

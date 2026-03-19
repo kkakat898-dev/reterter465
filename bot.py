@@ -1,11 +1,11 @@
 import asyncio
 import json
 import os
-import subprocess
 import tempfile
 from typing import Dict, Tuple
 from datetime import datetime
 from pathlib import Path
+
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -16,9 +16,12 @@ from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButto
 from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "апи"  # Замените на ваш токен
-ADMIN_ID = 5827096612  # Замените на ваш Telegram ID
-CHANNEL_ID = "@StriverDev"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "5827096612"))
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@StriverDev")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения")
 
 # Пути
 BASE_DIR = Path(__file__).parent
@@ -31,40 +34,37 @@ pending_files: Dict[str, dict] = {}
 # Параметры видео - ПРЕМИУМ КАЧЕСТВО
 ASPECT_RATIO = 2.35
 OUTPUT_WIDTH = 1920
-OUTPUT_HEIGHT = 816  # 1920/816 ≈ 2.35:1
+OUTPUT_HEIGHT = 816
 FPS = 60
 
 # ==================== DEBUG MODE ====================
-DEBUG_FILTERS = True  # Показывать какие фильтры применяются
+DEBUG_FILTERS = True
 
-# КРИТИЧНО: Настройки для идеального качества
-VIDEO_CRF = 0  # Lossless - без потерь качества
-VIDEO_PRESET = "veryslow"  # Максимальное качество кодирования
+# Настройки качества
+VIDEO_CRF = 0
+VIDEO_PRESET = "veryslow"
 
-# Масштабирование - сохраняем исходное качество
-EMOJI_SCALE = 1.4  # НЕ увеличиваем размер - исходное качество
-AUTO_SCALE = False  # Автоматически подбирать размер (макс 70% высоты)
-MAX_EMOJI_HEIGHT_PERCENT = 0.7  # Максимум 70% от высоты кадра
+EMOJI_SCALE = 1.4
+AUTO_SCALE = False
+MAX_EMOJI_HEIGHT_PERCENT = 0.7
 
-# Цветокоррекция и четкость
-SATURATION = 1.4  # Насыщенность (1.0 = норма, 1.2 = +20%, 1.5 = +50%)
-CONTRAST = 1.2  # Контраст (1.0 = норма, 1.15 = +15%, 1.3 = +30%)
-SHARPNESS = 0.0  # Четкость (0 = выкл, 1.0 = средняя, 2.0 = сильная)
+SATURATION = 1.4
+CONTRAST = 1.2
+SHARPNESS = 0.0
 
-# Премиум масштабирование - максимальное качество
 SCALE_ALGORITHM = "lanczos"
-LANCZOS_PARAM = 5  # Максимальное качество (3 стандарт, 5 максимум)
+LANCZOS_PARAM = 5
 
-# Дополнительные улучшения качества
-ENABLE_DEBAND = True  # Убирает полосы (banding)
-ENABLE_DENOISE = True  # Легкое шумоподавление (может размыть)
-DENOISE_STRENGTH = 1.5  # Сила шумоподавления (0.5-2.0)
+ENABLE_DEBAND = True
+ENABLE_DENOISE = True
+DENOISE_STRENGTH = 1.5
+
 
 class MediaUpload(StatesGroup):
     waiting_for_media = State()
 
+
 async def get_video_info(file_path: str) -> dict:
-    """Получение информации о видео/анимации"""
     try:
         cmd = [
             "ffprobe", "-v", "error",
@@ -106,28 +106,22 @@ async def get_video_info(file_path: str) -> dict:
 
 
 def calculate_optimal_scale(original_width: int, original_height: int) -> float:
-    """Рассчитывает оптимальный масштаб для эмодзи"""
     if not AUTO_SCALE:
         return EMOJI_SCALE
 
-    # Максимальная высота эмодзи
     max_height = OUTPUT_HEIGHT * MAX_EMOJI_HEIGHT_PERCENT
 
-    # Если эмодзи уже меньше максимума, не увеличиваем
     if original_height <= max_height:
         return 1.0
 
-    # Если больше - уменьшаем пропорционально
     scale = max_height / original_height
     return scale
 
 
 async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str = "black") -> bool:
-    """Конвертация WEBM в видео - ПРЕМИУМ качество без артефактов"""
     import shutil
 
     try:
-        # Получаем информацию о видео
         info = await get_video_info(input_path)
         duration = info['duration']
         original_width = info['width']
@@ -135,12 +129,10 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
 
         print(f"Original: {original_width}x{original_height}, duration: {duration}s")
 
-        # Рассчитываем оптимальный масштаб
         scale_factor = calculate_optimal_scale(original_width, original_height)
         print(f"Scale factor: {scale_factor}")
 
-        # Извлекаем кадры в максимальном качестве
-        frames_dir = input_path.replace(".webm", "_frames")
+        frames_dir = input_path.replace(".webm", "_frames").replace(".mp4", "_frames")
         os.makedirs(frames_dir, exist_ok=True)
 
         extract_cmd = [
@@ -172,7 +164,6 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
         original_fps = frame_count / duration if duration > 0 else 30
         print(f"Extracted {frame_count} frames, {original_fps:.2f} fps")
 
-        # ===== ПРЕМИУМ ОБРАБОТКА =====
         scale_flags = f"{SCALE_ALGORITHM}:param0={LANCZOS_PARAM}" if SCALE_ALGORITHM == "lanczos" else SCALE_ALGORITHM
 
         filters = []
@@ -186,7 +177,6 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
 
         sticker_filter = ",".join(filters)
 
-        # Цветокоррекция и четкость
         post_filters = []
 
         if SHARPNESS > 0:
@@ -218,7 +208,6 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
                 print(f"[FILTER] Denoise: {DENOISE_STRENGTH}")
 
         post_filters.append("format=yuv420p")
-
         post_filter_str = "," + ",".join(post_filters) if post_filters else ",format=yuv420p"
 
         full_filter = f"[0:v]{sticker_filter}[scaled];[1:v][scaled]overlay=(W-w)/2:(H-h)/2:format=auto:shortest=1{post_filter_str}"
@@ -240,8 +229,8 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
             "-preset", VIDEO_PRESET,
             "-crf", str(VIDEO_CRF),
             "-pix_fmt", "yuv420p",
-            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",  # КРИТИЧНО: принудительный размер
-            "-aspect", f"{ASPECT_RATIO}",  # КРИТИЧНО: принудительное соотношение сторон
+            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",
+            "-aspect", f"{ASPECT_RATIO}",
             "-r", str(FPS),
             "-t", str(duration),
             "-movflags", "+faststart",
@@ -271,16 +260,13 @@ async def convert_webm_to_video(input_path: str, output_path: str, bg_color: str
 
 
 async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str = "black") -> Tuple[bool, str]:
-    """Конвертация TGS в видео - ПРЕМИУМ качество"""
     import gzip
-    import shutil
 
     json_path = input_path.replace(".tgs", ".json")
     gif_path = input_path.replace(".tgs", ".gif")
     png_path = input_path.replace(".tgs", ".png")
 
     try:
-        # Распаковываем TGS
         with gzip.open(input_path, 'rb') as f_in:
             with open(json_path, 'wb') as f_out:
                 f_out.write(f_in.read())
@@ -291,7 +277,6 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
         original_width = 512
         original_height = 512
 
-        # Пробуем rlottie-python
         try:
             import importlib
             rlottie = importlib.import_module("rlottie_python")
@@ -315,7 +300,6 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
         except Exception as e:
             print(f"rlottie-python failed: {e}")
 
-        # Пробуем lottie library
         if not animation_created:
             try:
                 import importlib
@@ -329,14 +313,13 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
                 if os.path.exists(gif_path):
                     animation_created = True
                     animation_path = gif_path
-                    print(f"TGS via lottie library")
+                    print("TGS via lottie library")
             except Exception as e:
                 print(f"lottie library failed: {e}")
 
         if not animation_created:
             return False, "TGS_NO_LIBRARY"
 
-        # Получаем размеры
         if animation_path:
             info = await get_video_info(animation_path)
             original_width = info.get('width', 512)
@@ -345,7 +328,6 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
         scale_factor = calculate_optimal_scale(original_width, original_height)
         print(f"Scale factor: {scale_factor}")
 
-        # ===== ПРЕМИУМ ФИЛЬТРЫ =====
         scale_flags = f"{SCALE_ALGORITHM}:param0={LANCZOS_PARAM}" if SCALE_ALGORITHM == "lanczos" else SCALE_ALGORITHM
 
         filters = []
@@ -359,7 +341,6 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
 
         sticker_filter = ",".join(filters)
 
-        # Цветокоррекция и четкость
         post_filters = []
 
         if SHARPNESS > 0:
@@ -391,16 +372,9 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
                 print(f"[FILTER] Denoise: {DENOISE_STRENGTH}")
 
         post_filters.append("format=yuv420p")
-
         post_filter_str = "," + ",".join(post_filters) if post_filters else ",format=yuv420p"
 
         full_filter = f"[1:v]{sticker_filter}[scaled];[0:v][scaled]overlay=(W-w)/2:(H-h)/2:format=auto:shortest=1{post_filter_str}"
-
-        if DEBUG_FILTERS:
-            print(f"[FILTER] Full filter chain:")
-            print(f"  Sticker: {sticker_filter}")
-            print(f"  Post: {post_filter_str}")
-            print(f"[OUTPUT] Force output size: {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 
         cmd = [
             "ffmpeg", "-y",
@@ -412,8 +386,8 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
             "-preset", VIDEO_PRESET,
             "-crf", str(VIDEO_CRF),
             "-pix_fmt", "yuv420p",
-            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",  # КРИТИЧНО: принудительный размер
-            "-aspect", f"{ASPECT_RATIO}",  # КРИТИЧНО: принудительное соотношение сторон
+            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",
+            "-aspect", f"{ASPECT_RATIO}",
             "-r", str(FPS),
             "-t", str(duration),
             "-movflags", "+faststart",
@@ -451,7 +425,6 @@ async def convert_tgs_to_video(input_path: str, output_path: str, bg_color: str 
 
 
 async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str = "black") -> bool:
-    """Конвертация GIF в видео - ПРЕМИУМ качество"""
     try:
         info = await get_video_info(input_path)
         duration = info['duration']
@@ -461,7 +434,6 @@ async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str 
         scale_factor = calculate_optimal_scale(original_width, original_height)
         print(f"GIF: {original_width}x{original_height}, scale: {scale_factor}, duration: {duration}s")
 
-        # Премиум фильтры
         scale_flags = f"{SCALE_ALGORITHM}:param0={LANCZOS_PARAM}" if SCALE_ALGORITHM == "lanczos" else SCALE_ALGORITHM
 
         filters = []
@@ -475,14 +447,11 @@ async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str 
 
         sticker_filter = ",".join(filters)
 
-        # Цветокоррекция и четкость
         post_filters = []
 
         if SHARPNESS > 0:
             sharpness_filter = f"unsharp=5:5:{SHARPNESS}:5:5:{SHARPNESS}"
             post_filters.append(sharpness_filter)
-            if DEBUG_FILTERS:
-                print(f"[FILTER] Sharpness: {sharpness_filter}")
 
         eq_params = []
         if SATURATION != 1.0:
@@ -493,30 +462,17 @@ async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str 
         if eq_params:
             eq_filter = "eq=" + ":".join(eq_params)
             post_filters.append(eq_filter)
-            if DEBUG_FILTERS:
-                print(f"[FILTER] Color correction: {eq_filter}")
 
         if ENABLE_DEBAND:
             post_filters.append("gradfun=strength=3:radius=12")
-            if DEBUG_FILTERS:
-                print("[FILTER] Deband enabled")
 
         if ENABLE_DENOISE:
             post_filters.append(f"hqdn3d={DENOISE_STRENGTH}:{DENOISE_STRENGTH}:3:3")
-            if DEBUG_FILTERS:
-                print(f"[FILTER] Denoise: {DENOISE_STRENGTH}")
 
         post_filters.append("format=yuv420p")
-
         post_filter_str = "," + ",".join(post_filters) if post_filters else ",format=yuv420p"
 
         full_filter = f"[1:v]{sticker_filter}[scaled];[0:v][scaled]overlay=(W-w)/2:(H-h)/2:format=auto:shortest=1{post_filter_str}"
-
-        if DEBUG_FILTERS:
-            print(f"[FILTER] Full filter chain:")
-            print(f"  Sticker: {sticker_filter}")
-            print(f"  Post: {post_filter_str}")
-            print(f"[OUTPUT] Force output size: {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")
 
         cmd = [
             "ffmpeg", "-y",
@@ -528,8 +484,8 @@ async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str 
             "-preset", VIDEO_PRESET,
             "-crf", str(VIDEO_CRF),
             "-pix_fmt", "yuv420p",
-            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",  # КРИТИЧНО: принудительный размер
-            "-aspect", f"{ASPECT_RATIO}",  # КРИТИЧНО: принудительное соотношение сторон
+            "-s", f"{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}",
+            "-aspect", f"{ASPECT_RATIO}",
             "-r", str(FPS),
             "-t", str(duration),
             "-movflags", "+faststart",
@@ -546,13 +502,15 @@ async def convert_gif_to_video(input_path: str, output_path: str, bg_color: str 
         )
         _, stderr = await process.communicate()
 
+        if process.returncode != 0:
+            print(f"GIF ffmpeg error: {stderr.decode()}")
+
         return process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
     except Exception as e:
         print(f"GIF conversion error: {e}")
         return False
 
 
-# Создаем директории
 TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -564,23 +522,19 @@ def load_db() -> dict:
             return json.load(f)
     return {"users": {}, "conversions": [], "stats": {"total": 0}}
 
+
+def save_db(db: dict) -> None:
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+
 def get_media_db() -> dict:
     db = load_db()
     if "media" not in db:
-        db["media"] = {"greeting": None}
+        db["media"] = {"greeting": None, "subscription": None}
         save_db(db)
     return db["media"]
 
-async def check_subscription(user_id: int) -> bool:
-    """Проверяет подписан ли пользователь на канал"""
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        # Статусы: creator, administrator, member = подписан
-        # left, kicked = не подписан
-        return member.status in ["creator", "administrator", "member"]
-    except Exception as e:
-        print(f"Subscription check error: {e}")
-        return False
 
 def save_media(section: str, media_data: dict) -> None:
     db = load_db()
@@ -594,17 +548,12 @@ def get_media(section: str) -> dict:
     media_db = get_media_db()
     return media_db.get(section)
 
-def save_db(db: dict) -> None:
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
-
 
 def add_user(user_id: int, username: str = None, first_name: str = None) -> None:
     db = load_db()
     user_key = str(user_id)
 
     if user_key not in db["users"]:
-        # Новый пользователь
         db["users"][user_key] = {
             "username": username,
             "first_name": first_name,
@@ -613,22 +562,21 @@ def add_user(user_id: int, username: str = None, first_name: str = None) -> None
             "blocked": False
         }
     else:
-        # Обновляем данные существующего пользователя
         db["users"][user_key]["username"] = username
         db["users"][user_key]["first_name"] = first_name
 
     save_db(db)
 
+
 def is_user_blocked(user_id: int) -> bool:
-    """Проверяет, заблокирован ли пользователь"""
     db = load_db()
     user_data = db["users"].get(str(user_id))
     if user_data:
         return user_data.get("blocked", False)
     return False
 
+
 def toggle_user_block(user_id: int) -> bool:
-    """Переключает статус блокировки пользователя. Возвращает новый статус."""
     db = load_db()
     if str(user_id) in db["users"]:
         current_status = db["users"][str(user_id)].get("blocked", False)
@@ -636,6 +584,7 @@ def toggle_user_block(user_id: int) -> bool:
         save_db(db)
         return not current_status
     return False
+
 
 def log_conversion(user_id: int, sticker_id: str) -> None:
     db = load_db()
@@ -655,14 +604,6 @@ def get_format_keyboard(file_id: str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🎞 GIF", callback_data=f"format:gif:{file_id}"),
             InlineKeyboardButton(text="🎬 Видео", callback_data=f"format:video:{file_id}")
-        ]
-    ])
-
-
-def get_color_keyboard(format_type: str, file_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⚫️ Черный", callback_data=f"color:{format_type}:black:{file_id}")
         ]
     ])
 
@@ -696,7 +637,6 @@ def get_back_keyboard(callback_data: str = "admin:media_back") -> InlineKeyboard
 
 
 def get_users_list_keyboard(users: dict, page: int = 0, per_page: int = 10) -> InlineKeyboardMarkup:
-    # Сортируем пользователей по количеству конвертаций (больше -> выше)
     sorted_users = sorted(
         users.items(),
         key=lambda x: x[1].get("conversions", 0),
@@ -710,7 +650,6 @@ def get_users_list_keyboard(users: dict, page: int = 0, per_page: int = 10) -> I
 
     buttons = []
     for user_id, user_data in page_users:
-        # Приоритет: first_name > username > "Без имени"
         display_name = user_data.get("first_name") or user_data.get("username") or "Без имени"
         conversions = user_data.get("conversions", 0)
 
@@ -719,7 +658,6 @@ def get_users_list_keyboard(users: dict, page: int = 0, per_page: int = 10) -> I
             callback_data=f"user:info:{user_id}"
         )])
 
-    # Кнопки навигации
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="⭠ Назад", callback_data=f"users:page:{page - 1}"))
@@ -745,57 +683,29 @@ def get_user_info_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔙 К списку", callback_data="stats:users_back")]
     ])
 
+
 def get_subscription_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔗 Подписаться", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}")],
         [InlineKeyboardButton(text="♻️ Продолжить", callback_data="check_subscription")]
     ])
 
-# ==================== БОТ ====================
+
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+async def check_subscription(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        print(f"Subscription check error: {e}")
+        return False
 
-    # Проверяем блокировку
-    if is_user_blocked(message.from_user.id):
-        return
-
-    # Проверяем подписку (админ пропускается)
-    if message.from_user.id != ADMIN_ID:
-        is_subscribed = await check_subscription(message.from_user.id)
-        if not is_subscribed:
-            await send_subscription_message(message)
-            return
-
-    # Если подписан - показываем стартовое сообщение
-    media = get_media("greeting")
-    text = "<blockquote>👾 <b>Ку, кинь мне стикер или анимированый эмодзи</b></blockquote>"
-
-    if media:
-        media_type = media.get("type")
-        file_id = media.get("file_id")
-
-        try:
-            if media_type == "photo":
-                await message.answer_photo(photo=file_id, caption=text, parse_mode=ParseMode.HTML)
-            elif media_type == "video":
-                await message.answer_video(video=file_id, caption=text, parse_mode=ParseMode.HTML)
-            elif media_type == "animation":
-                await message.answer_animation(animation=file_id, caption=text, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            print(f"Media error: {e}")
-            await message.answer(text, parse_mode=ParseMode.HTML)
-            save_media("greeting", None)
-    else:
-        await message.answer(text, parse_mode=ParseMode.HTML)
 
 async def send_subscription_message(message: types.Message):
-    """Отправляет сообщение о необходимости подписки"""
     media = get_media("subscription")
     text = "<blockquote>📂 <b>Подпишись на канал владельца чтобы продолжить</b></blockquote>"
 
@@ -834,12 +744,9 @@ async def send_subscription_message(message: types.Message):
 
 
 async def check_and_notify_subscription(message: types.Message) -> bool:
-    """Проверяет подписку и блокировку. Возвращает True если можно продолжить."""
-    # Админ всегда проходит
     if message.from_user.id == ADMIN_ID:
         return True
 
-    # Проверяем блокировку
     if is_user_blocked(message.from_user.id):
         return False
 
@@ -851,85 +758,41 @@ async def check_and_notify_subscription(message: types.Message) -> bool:
 
     return True
 
-@dp.message(F.sticker)
-async def handle_sticker(message: types.Message):
-    # Проверяем подписку
-    if not await check_and_notify_subscription(message):
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+
+    if is_user_blocked(message.from_user.id):
         return
 
-    sticker = message.sticker
+    if message.from_user.id != ADMIN_ID:
+        is_subscribed = await check_subscription(message.from_user.id)
+        if not is_subscribed:
+            await send_subscription_message(message)
+            return
 
-    if not sticker.is_animated and not sticker.is_video:
-        await message.answer(
-            "❌ <b>Это не анимированный стикер!</b>\n"
-            "Отправьте анимированный стикер или видео-стикер.",
-            parse_mode=ParseMode.HTML
-        )
-        return
+    media = get_media("greeting")
+    text = "<blockquote>👾 <b>Ку, кинь мне стикер или анимированый эмодзи</b></blockquote>"
 
-    processing_msg = await message.answer(
-        "<blockquote>⏳ <b>Загружаю стикер...</b></blockquote>",
-        parse_mode=ParseMode.HTML
-    )
+    if media:
+        media_type = media.get("type")
+        file_id = media.get("file_id")
 
-    try:
-        ext = ".webm" if sticker.is_video else ".tgs"
-        input_path = str(TEMP_DIR / f"{sticker.file_unique_id}{ext}")
-        output_path = str(OUTPUT_DIR / f"{sticker.file_unique_id}_premium.mp4")
+        try:
+            if media_type == "photo":
+                await message.answer_photo(photo=file_id, caption=text, parse_mode=ParseMode.HTML)
+            elif media_type == "video":
+                await message.answer_video(video=file_id, caption=text, parse_mode=ParseMode.HTML)
+            elif media_type == "animation":
+                await message.answer_animation(animation=file_id, caption=text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"Media error: {e}")
+            await message.answer(text, parse_mode=ParseMode.HTML)
+            save_media("greeting", None)
+    else:
+        await message.answer(text, parse_mode=ParseMode.HTML)
 
-        file = await bot.get_file(sticker.file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        await processing_msg.edit_text(
-            "<blockquote>⏳ <b>Конвертирую...</b></blockquote>",
-            parse_mode=ParseMode.HTML
-        )
-
-        if sticker.is_video:
-            success = await convert_webm_to_video(input_path, output_path)
-            error_msg = ""
-        else:
-            success, error_msg = await convert_tgs_to_video(input_path, output_path)
-
-        if success and os.path.exists(output_path):
-            file_id = sticker.file_unique_id
-            pending_files[file_id] = {
-                "path": output_path,
-                "input_path": input_path,
-                "user_id": message.from_user.id
-            }
-
-            await processing_msg.edit_text(
-                "<blockquote>⚙️ <b>Выберите формат:</b></blockquote>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_format_keyboard(file_id)
-            )
-
-            log_conversion(message.from_user.id, sticker.file_unique_id)
-        else:
-            if error_msg == "TGS_NO_LIBRARY":
-                await processing_msg.edit_text(
-                    "❌ <b>Требуется библиотека:</b>\n\n"
-                    "<code>pip install rlottie-python</code>\n\n"
-                    "Или используйте WEBM стикеры",
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await processing_msg.edit_text(
-                    "❌ <b>Ошибка конвертации</b>",
-                    parse_mode=ParseMode.HTML
-                )
-
-            if os.path.exists(input_path):
-                os.remove(input_path)
-            if os.path.exists(output_path):
-                os.remove(output_path)
-
-    except Exception as e:
-        await processing_msg.edit_text(
-            f"❌ <b>Ошибка:</b>\n<code>{str(e)[:100]}</code>",
-            parse_mode=ParseMode.HTML
-        )
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -942,8 +805,12 @@ async def cmd_admin(message: types.Message):
         reply_markup=get_admin_keyboard()
     )
 
+
 @dp.message(F.sticker)
 async def handle_sticker(message: types.Message):
+    if not await check_and_notify_subscription(message):
+        return
+
     sticker = message.sticker
 
     if not sticker.is_animated and not sticker.is_video:
@@ -1021,14 +888,11 @@ async def handle_sticker(message: types.Message):
 
 @dp.message(F.animation)
 async def handle_animation(message: types.Message, state: FSMContext):
-    # Проверяем, не загружаем ли мы медиа для админки
     current_state = await state.get_state()
     if current_state == MediaUpload.waiting_for_media and message.from_user.id == ADMIN_ID:
-        # Если админ загружает медиа - передаем в process_media_upload
         await process_media_upload(message, state)
         return
 
-    # Проверяем подписку
     if not await check_and_notify_subscription(message):
         return
 
@@ -1085,6 +949,7 @@ async def handle_animation(message: types.Message, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
 
+
 @dp.message(F.text)
 async def handle_custom_emoji(message: types.Message):
     if not message.entities:
@@ -1095,7 +960,6 @@ async def handle_custom_emoji(message: types.Message):
     if not custom_emojis:
         return
 
-    # Проверяем подписку
     if not await check_and_notify_subscription(message):
         return
 
@@ -1172,6 +1036,7 @@ async def handle_custom_emoji(message: types.Message):
             parse_mode=ParseMode.HTML
         )
 
+
 @dp.callback_query(F.data.startswith("format:"))
 async def handle_format_choice(callback: CallbackQuery):
     await callback.answer()
@@ -1186,7 +1051,6 @@ async def handle_format_choice(callback: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
-    # Сразу конвертируем с черным фоном
     await handle_color_choice_direct(callback, format_type, "black", file_id)
 
 
@@ -1194,21 +1058,18 @@ async def handle_format_choice(callback: CallbackQuery):
 async def handle_check_subscription(callback: CallbackQuery):
     user_id = callback.from_user.id
 
-    # Админ всегда проходит
     if user_id == ADMIN_ID:
         await callback.answer("✔️ Добро пожаловать, админ!")
         await callback.message.delete()
         await cmd_start(callback.message)
         return
 
-    # Проверяем подписку
     is_subscribed = await check_subscription(user_id)
 
     if is_subscribed:
         await callback.answer("✔️ Спасибо за подписку!")
         await callback.message.delete()
 
-        # Отправляем стартовое сообщение
         media = get_media("greeting")
         text = "<blockquote>👾 <b>Ку, кинь мне стикер или анимированый эмодзи</b></blockquote>"
 
@@ -1238,7 +1099,7 @@ async def handle_check_subscription(callback: CallbackQuery):
                         caption=text,
                         parse_mode=ParseMode.HTML
                     )
-            except:
+            except Exception:
                 await bot.send_message(
                     chat_id=callback.message.chat.id,
                     text=text,
@@ -1253,8 +1114,8 @@ async def handle_check_subscription(callback: CallbackQuery):
     else:
         await callback.answer("✖️ Шо ты хитри да", show_alert=True)
 
+
 async def handle_color_choice_direct(callback: CallbackQuery, format_type: str, bg_color: str, file_id: str):
-    """Прямая конвертация без выбора цвета"""
     if file_id not in pending_files:
         await callback.message.edit_text("❌ Файл не найден. Отправьте эмодзи заново.")
         return
@@ -1272,7 +1133,7 @@ async def handle_color_choice_direct(callback: CallbackQuery, format_type: str, 
         if os.path.exists(old_path):
             try:
                 os.remove(old_path)
-            except:
+            except Exception:
                 pass
 
         if input_path.endswith(".webm") or input_path.endswith(".mp4"):
@@ -1299,7 +1160,7 @@ async def handle_color_choice_direct(callback: CallbackQuery, format_type: str, 
                     os.remove(file_data["path"])
                 if input_path and os.path.exists(input_path):
                     os.remove(input_path)
-            except:
+            except Exception:
                 pass
         else:
             await callback.message.edit_text(
@@ -1316,9 +1177,9 @@ async def handle_color_choice_direct(callback: CallbackQuery, format_type: str, 
         if file_id in pending_files:
             del pending_files[file_id]
 
+
 @dp.callback_query(F.data.startswith("color:"))
 async def handle_color_choice(callback: CallbackQuery):
-    """Обработка выбора цвета фона - отправляем файл"""
     await callback.answer()
     _, format_type, bg_color, file_id = callback.data.split(":")
 
@@ -1335,22 +1196,17 @@ async def handle_color_choice(callback: CallbackQuery):
     )
 
     try:
-        # Создаем новый output path с цветом и timestamp для принудительного пересоздания
         import time
         base_name = os.path.basename(file_data["path"]).replace("_premium.mp4", "")
         timestamp = str(int(time.time()))
         output_path = str(OUTPUT_DIR / f"{base_name}_{bg_color}_{timestamp}_premium.mp4")
 
-        # Удаляем старый файл если существует (принудительное пересоздание)
         old_path = str(OUTPUT_DIR / f"{base_name}_{bg_color}_premium.mp4")
         if os.path.exists(old_path):
             try:
                 os.remove(old_path)
-                print(f"[CLEANUP] Removed old file: {old_path}")
-            except:
+            except Exception:
                 pass
-
-        print(f"[CONVERT] Creating video with bg_color={bg_color}")
 
         if input_path.endswith(".webm") or input_path.endswith(".mp4"):
             success = await convert_webm_to_video(input_path, output_path, bg_color)
@@ -1369,7 +1225,6 @@ async def handle_color_choice(callback: CallbackQuery):
 
             await callback.message.delete()
 
-            # Очистка
             try:
                 if os.path.exists(output_path):
                     os.remove(output_path)
@@ -1377,7 +1232,7 @@ async def handle_color_choice(callback: CallbackQuery):
                     os.remove(file_data["path"])
                 if input_path and os.path.exists(input_path):
                     os.remove(input_path)
-            except:
+            except Exception:
                 pass
         else:
             await callback.message.edit_text(
@@ -1552,7 +1407,6 @@ async def handle_user_info(callback: CallbackQuery):
         await callback.answer("❌ Пользователь не найден", show_alert=True)
         return
 
-    # Приоритет: first_name > username > "Без имени"
     display_name = user_data.get("first_name") or user_data.get("username") or "Без имени"
     username = user_data.get("username", "Без юзернейма")
     conversions = user_data.get("conversions", 0)
@@ -1587,7 +1441,7 @@ async def handle_user_info(callback: CallbackQuery):
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_user_info_keyboard(int(user_id))
             )
-    except:
+    except Exception:
         await callback.message.answer(
             text,
             parse_mode=ParseMode.HTML,
@@ -1610,7 +1464,6 @@ async def handle_toggle_block(callback: CallbackQuery):
     else:
         await callback.answer("🟢 Пользователь разблокирован", show_alert=True)
 
-    # Обновляем информацию о пользователе
     db = load_db()
     user_data = db["users"].get(str(user_id))
 
@@ -1639,7 +1492,7 @@ async def handle_toggle_block(callback: CallbackQuery):
             parse_mode=ParseMode.HTML,
             reply_markup=get_user_info_keyboard(user_id)
         )
-    except:
+    except Exception:
         await callback.message.edit_text(
             text=text,
             parse_mode=ParseMode.HTML,
@@ -1664,6 +1517,7 @@ async def handle_users_pagination(callback: CallbackQuery):
         parse_mode=ParseMode.HTML,
         reply_markup=get_users_list_keyboard(users, page=page)
     )
+
 
 @dp.message(MediaUpload.waiting_for_media, F.photo | F.video | F.animation)
 async def process_media_upload(message: types.Message, state: FSMContext):
@@ -1700,38 +1554,25 @@ async def process_media_upload(message: types.Message, state: FSMContext):
         reply_markup=get_back_keyboard("admin:media_back")
     )
 
+
 async def main():
     print("✨ Premium Emoji Bot запущен!")
     print("=" * 50)
-    print("🎨 НАСТРОЙКИ КАЧЕСТВА:")
-    print(f"   • Масштабирование: {SCALE_ALGORITHM.upper()}")
-    if SCALE_ALGORITHM == "lanczos":
-        print(f"   • Lanczos параметр: {LANCZOS_PARAM}")
-    print(f"   • Авто-масштаб: {'Включен' if AUTO_SCALE else 'Выключен'}")
-    if AUTO_SCALE:
-        print(f"   • Макс. размер: {MAX_EMOJI_HEIGHT_PERCENT * 100}% высоты")
-    else:
-        print(f"   • Ручной масштаб: {EMOJI_SCALE}x")
-    print(f"   • Сглаживание: Включено (anti-aliasing)")
-    print(f"   • Резкость: Отключена")
-    print(f"   • Деградиент: {'Включен' if ENABLE_DEBAND else 'Выключен'}")
-    print(f"   • Шумоподавление: {'Включено' if ENABLE_DENOISE else 'Выключено'}")
-    print(f"   • CRF: {VIDEO_CRF} (lossless)")
-    print(f"   • Preset: {VIDEO_PRESET}")
+    print(f"Python env OK")
+    print(f"ADMIN_ID: {ADMIN_ID}")
+    print(f"CHANNEL_ID: {CHANNEL_ID}")
     print("=" * 50)
 
     if not DB_FILE.exists():
-        save_db({"users": {}, "conversions": [], "stats": {"total": 0}})
+        save_db({"users": {}, "conversions": [], "stats": {"total": 0}, "media": {"greeting": None, "subscription": None}})
 
-    # КРИТИЧНО: Сначала удаляем все старые команды
     try:
         await bot.delete_my_commands(scope=BotCommandScopeDefault())
         await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=ADMIN_ID))
         print("🗑️ Старые команды удалены")
-    except:
+    except Exception:
         pass
 
-    # Устанавливаем команды для обычных пользователей
     await bot.set_my_commands(
         commands=[
             BotCommand(command="start", description="🚀 Запустить бота")
@@ -1740,7 +1581,6 @@ async def main():
     )
     print("✔️ Команды для пользователей установлены")
 
-    # Устанавливаем команды для админа
     await bot.set_my_commands(
         commands=[
             BotCommand(command="start", description="🚀 Запустить бота"),
